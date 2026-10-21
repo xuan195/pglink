@@ -896,11 +896,15 @@ class SHACLGenerator:
             classes = ontology.get("classes", [])
             properties = ontology.get("properties", [])
 
-            # Resolve base_uri from ontology namespace if present
-            ns = ontology.get("namespace", {})
-            base_uri = (
-                ns.get("base_uri", self.base_uri) if isinstance(ns, dict) else self.base_uri
-            )
+            # Resolve base_uri from ontology namespace if present.
+            # namespace 可能是 dict {"base_uri": ...} 或字符串（本体 URI）。
+            ns = ontology.get("namespace")
+            if isinstance(ns, dict):
+                base_uri = ns.get("base_uri", self.base_uri)
+            elif isinstance(ns, str) and ns:
+                base_uri = ns
+            else:
+                base_uri = self.base_uri
             if not base_uri.endswith("/") and not base_uri.endswith("#"):
                 base_uri += "/"
 
@@ -1067,7 +1071,13 @@ class SHACLGenerator:
     def _build_class_index(
         self, classes: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        return {c["name"]: c for c in classes if c.get("name")}
+        idx: Dict[str, Dict[str, Any]] = {}
+        for c in classes:
+            if c.get("name"):
+                idx[c["name"]] = c
+            if c.get("uri"):
+                idx[c["uri"]] = c
+        return idx
 
     def _generate_node_shapes(
         self, graph: SHACLGraph, classes: List[Dict[str, Any]]
@@ -1076,8 +1086,11 @@ class SHACLGenerator:
             name = cls.get("name")
             if not name:
                 continue
+            # 用 class URI 作为 target_class 身份，使 domain 匹配（用 URI）
+            # 与 sh:targetClass 输出都指向真实类节点。
+            target_class = cls.get("uri") or name
             shape = NodeShape(
-                target_class=name,
+                target_class=target_class,
                 name=cls.get("label") or cls.get("name"),
                 description=cls.get("description") or cls.get("comment"),
                 severity=self.severity,
@@ -1161,7 +1174,7 @@ class SHACLGenerator:
         pattern = prop.get("pattern") if self.quality_tier in ("standard", "strict") else None
 
         return PropertyShape(
-            path=prop.get("name", ""),
+            path=prop.get("uri") or prop.get("name", ""),
             name=prop.get("label") or prop.get("name"),
             description=prop.get("description") or prop.get("comment"),
             datatype=datatype,
@@ -1262,14 +1275,20 @@ class SHACLGenerator:
             return f"<{value}>"
         return value
 
+    def _shape_uri(self, graph: SHACLGraph, target_class: str) -> str:
+        """Construct the NodeShape URI; handle full-URI target_class too."""
+        if target_class.startswith("http://") or target_class.startswith("https://"):
+            return f"<{target_class}Shape>"
+        return f"{graph.base_uri}{target_class}Shape"
+
     def _serialize_turtle(self, graph: SHACLGraph) -> str:
         lines = [self._prefix_decls(graph), ""]
         lines.append(f"<{graph.shapes_uri}> a owl:Ontology .")
         lines.append("")
 
         for node_shape in graph.node_shapes:
-            shape_uri = f"{graph.base_uri}{node_shape.target_class}Shape"
-            block = [f"<{shape_uri}>"]
+            shape_uri = self._shape_uri(graph, node_shape.target_class)
+            block = [f"{shape_uri}"]
             block.append("    a sh:NodeShape ;")
             block.append(
                 f"    sh:targetClass {self._uri(graph, node_shape.target_class)} ;"
@@ -1328,7 +1347,7 @@ class SHACLGenerator:
             {"@id": graph.shapes_uri, "@type": "owl:Ontology"}
         ]
         for node_shape in graph.node_shapes:
-            shape_id = f"{graph.base_uri}{node_shape.target_class}Shape"
+            shape_id = self._shape_uri(graph, node_shape.target_class)
             node: Dict[str, Any] = {
                 "@id": shape_id,
                 "@type": "sh:NodeShape",
@@ -1385,8 +1404,13 @@ class SHACLGenerator:
         t(f"<{graph.shapes_uri}>", f"<{RDF}type>", f"<{OWL}Ontology>")
 
         for i, node_shape in enumerate(graph.node_shapes):
-            shape_uri = f"<{graph.base_uri}{node_shape.target_class}Shape>"
-            class_uri = f'<{self._term_iri(graph, node_shape.target_class, "class")}>'
+            tc = node_shape.target_class
+            shape_uri = (
+                f"<{tc}Shape>"
+                if tc.startswith(("http://", "https://"))
+                else f"<{graph.base_uri}{tc}Shape>"
+            )
+            class_uri = f'<{self._term_iri(graph, tc, "class")}>'
             t(shape_uri, f"<{RDF}type>", f"<{SHACL}NodeShape>")
             t(shape_uri, f"<{SHACL}targetClass>", class_uri)
             if node_shape.name:

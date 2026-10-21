@@ -38,20 +38,38 @@ type OntologyNodeData = {
   label?: string;
   type?: string;
   entityType?: EditorEntityType;
+  draftState?: string;
+  version?: string;
 };
 
 type OntologyNode = Node<OntologyNodeData>;
 type OntologyEdge = Edge<Record<string, unknown>>;
 
 const nodeTypes = {
-  classNode: ({ data }: { data: OntologyNodeData }) => (
-    <div style={classNodeStyle}>
-      <Handle type="target" position={Position.Left} style={handleStyle} />
-      <div style={classNodeHeader}>{data.label}</div>
-      <div style={classNodeSub}>{data.type}</div>
-      <Handle type="source" position={Position.Right} style={handleStyle} />
-    </div>
-  ),
+  classNode: ({ data }: { data: OntologyNodeData }) => {
+    const isDraft = data.draftState === "draft";
+    return (
+      <div
+        style={{
+          ...classNodeStyle,
+          border: isDraft
+            ? "1px dashed rgba(255, 196, 0, 0.6)"
+            : "1px solid rgba(127, 208, 255, 0.3)",
+          background: isDraft
+            ? "linear-gradient(135deg, rgba(255, 196, 0, 0.12), rgba(255, 196, 0, 0.04))"
+            : "linear-gradient(135deg, rgba(74, 163, 255, 0.15), rgba(74, 163, 255, 0.05))",
+        }}
+      >
+        <Handle type="target" position={Position.Left} style={handleStyle} />
+        <div style={classNodeHeader}>{data.label}</div>
+        <div style={classNodeSub}>
+          {data.type}
+          {isDraft ? " · draft" : ""}
+        </div>
+        <Handle type="source" position={Position.Right} style={handleStyle} />
+      </div>
+    );
+  },
 };
 
 const handleStyle: React.CSSProperties = {
@@ -334,7 +352,7 @@ export function OntologyEditor() {
       id: newId,
       type: "classNode",
       position: { x: Math.random() * 400, y: Math.random() * 300 },
-      data: { label: "NewClass", type: "owl:Class", entityType: "class" },
+      data: { label: "NewClass", type: "owl:Class", entityType: "class", draftState: "draft" },
     };
     setNodes((nds) => [...nds, newNode]);
     setDraftDiff((prev) => ({
@@ -370,7 +388,7 @@ export function OntologyEditor() {
       id: newId,
       type: "classNode",
       position: { x: Math.random() * 400, y: Math.random() * 300 },
-      data: { label: "NewIndividual", type: "owl:NamedIndividual", entityType: "external" },
+      data: { label: "NewIndividual", type: "owl:NamedIndividual", entityType: "external", draftState: "draft" },
     };
     setNodes((nds) => [...nds, newNode]);
   }, [setNodes]);
@@ -401,7 +419,7 @@ export function OntologyEditor() {
   const saveDraft = useCallback(async () => {
     if (!ontologyUri) {
       alert("Please select an ontology first");
-      return;
+      return "";
     }
     setIsSaving(true);
     try {
@@ -418,14 +436,103 @@ export function OntologyEditor() {
       if (response.ok) {
         const data = await response.json();
         alert(`Draft saved: ${data.draft_id}`);
+        return data.draft_id as string;
       }
+      const err = await response.text().catch(() => `HTTP ${response.status}`);
+      alert(`Failed to save draft: ${err}`);
+      return "";
     } catch (error) {
       console.error("Failed to save draft:", error);
       alert("Failed to save draft");
+      return "";
     } finally {
       setIsSaving(false);
     }
   }, [ontologyUri, draftDiff]);
+
+  const loadOntology = useCallback(async (uri: string) => {
+    if (!uri) return;
+    try {
+      const res = await fetch("/api/graph/nodes?limit=5000");
+      if (!res.ok) return;
+      const data = await res.json();
+      const all = (data.nodes || []) as Array<{
+        id: string;
+        type: string;
+        content?: string;
+        properties?: Record<string, any>;
+      }>;
+
+      // Match nodes belonging to this ontology: by scheme_uri / ontologyUri / uri,
+      // or by id starting with the ontology namespace.
+      const ns = uri.includes("#")
+        ? uri.split("#")[0] + "#"
+        : uri.endsWith("/") ? uri : uri + "/";
+
+      const matched = all.filter((n) => {
+        const p = n.properties || {};
+        const owner = p.scheme_uri || p.ontologyUri || p.uri;
+        if (owner === uri) return true;
+        if (n.id === uri) return true;
+        if (n.id && (n.id === ns || n.id.startsWith(ns))) return true;
+        return false;
+      });
+
+      const loadedClasses = matched.filter((n) => (n.type || "").includes("Class"));
+      const loadedProperties = matched.filter((n) => (n.type || "").includes("Property"));
+
+      const existingIds = new Set<string>();
+      const newNodes: OntologyNode[] = loadedClasses.map((cls, idx) => {
+        existingIds.add(cls.id);
+        const p = cls.properties || {};
+        return {
+          id: cls.id,
+          type: "classNode",
+          position: { x: 120 + (idx % 4) * 200, y: 120 + Math.floor(idx / 4) * 150 },
+          data: {
+            label: cls.content || cls.id,
+            type: cls.type || "owl:Class",
+            draftState: p.draftState,
+            version: p.version,
+          },
+        };
+      });
+
+      // Preserve any newly-added classes that are not yet persisted.
+      setNodes((prev) => {
+        const preserved = prev.filter((n) => !existingIds.has(n.id));
+        return [...newNodes, ...preserved];
+      });
+
+      // Best-effort property edges: connect first two classes per property node.
+      const propertyEdges: OntologyEdge[] = loadedProperties.map((prop) => ({
+        id: `edge_${prop.id}`,
+        source: loadedClasses[0]?.id || "",
+        target: loadedClasses[1]?.id || "",
+        label: prop.content || prop.id,
+        type: "smoothstep",
+        animated: true,
+      }));
+      setEdges((prev) => {
+        const preserved = prev.filter((e) => !loadedProperties.some((p) => `edge_${p.id}` === e.id));
+        return [...propertyEdges, ...preserved];
+      });
+    } catch (error) {
+      console.error("Failed to load ontology classes:", error);
+    }
+  }, [setNodes, setEdges]);
+
+  useEffect(() => {
+    if (!ontologyUri) return;
+    let cancelled = false;
+    loadOntology(ontologyUri).then(() => {
+      if (cancelled) return;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ontologyUri, loadOntology]);
+
 
   const handleNodeContextMenu = useCallback((event: React.MouseEvent, node: OntologyNode) => {
     event.preventDefault();
@@ -581,7 +688,11 @@ export function OntologyEditor() {
           <Plus size={14} />
           Add Class
         </button>
-        <button style={toolbarButtonStyle} onClick={addProperty} disabled={nodes.length < 2}>
+        <button
+          style={toolbarButtonStyle}
+          onClick={addProperty}
+          title={nodes.length < 2 ? "Add at least two classes before creating a property" : "Create a property edge between two classes"}
+        >
           <GitBranch size={14} />
           Add Property
         </button>

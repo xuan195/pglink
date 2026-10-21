@@ -9,21 +9,7 @@ RUN npm ci
 COPY explorer/ ./
 RUN mkdir -p /app/semantica && npm run build
 
-# OpenSSL (openssl, libssl3t64, openssl-provider-legacy) is patched in the
-# runtime stage's --only-upgrade layer below, not by bumping this digest:
-# Debian ships fixes to trixie-security well before the python:3.13-slim tag
-# is rebuilt on top of them.
-#
-# Pinned to 3.13, NOT 3.14. The image must stay inside the supported range in
-# pyproject.toml (`requires-python = ">=3.10,<3.14"`, Install Matrix 3.10-3.13)
-# and on the interpreter explorer-extra-py313.txt below was resolved for.
-# Dependabot bumped this to python:3.14-slim in #1290 (which broke the build:
-# no cp314 wheel for gensim, so pip compiled it and the slim image has no gcc)
-# and again in #1547; .github/dependabot.yml now ignores python minor/major
-# bumps for this image. gensim (extras graph-embeddings / split-topic) still
-# ships no cp314 wheel. Raise the ceiling in pyproject.toml, the Install Matrix
-# and this image together once 3.14 is verified, not with a lone image bump.
-FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 AS runtime
+FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -75,39 +61,9 @@ COPY semantica/ ./semantica/
 COPY integrations/ ./integrations/
 COPY --from=frontend-builder /app/semantica/static ./semantica/static
 
-# explorer-extra-py313.txt is `uv pip compile pyproject.toml --extra explorer
-# --python-version 3.13 --constraint requirements-ci.txt --generate-hashes`
-# (see ci.yml's explorer-extra-py311.txt for the CI counterpart, resolved
-# for CI's python 3.11 instead - the two aren't interchangeable: audioread
-# (via librosa) needs standard-aifc/standard-sunau only on python>=3.13,
-# since aifc/sunau left stdlib there, so a 3.11-resolved lockfile is
-# missing hashes pip needs on this image's actual 3.13 interpreter and
-# --require-hashes fails outright rather than silently under-pinning).
-# Every fetched package is hash-verified (Scorecard Pinned-Dependencies)
-# and pinned to the same versions CI audited, e.g. msgpack==1.2.1 and
-# setuptools==84.0.0 (which also replaces the base image's vulnerable
-# 70.3.0, CVE-2025-47273 - nothing else in the tree pulls a newer copy).
-# --no-deps on the local package itself: it's our own source tree, not a
-# fetch, so there's nothing to hash-pin there - but `pip install .` still
-# does a PEP 517 build, which by default creates an *isolated* build env
-# and fetches [build-system] requires (setuptools, wheel) completely
-# outside any hash checking. pep517-build.txt pins that exact
-# build-system.requires; installing it first and passing
-# --no-build-isolation makes pip reuse those hash-verified copies instead
-# of fetching its own.
-#
-# pip itself is uninstalled once it's done: nothing in the running app
-# shells out to it, and it carries its own vendored urllib3 in
-# pip/_vendor that the hash-pinned urllib3==2.8.0 above can't replace.
-# pip 26.2.1 (the latest release, and what the base image ships) vendors
-# urllib3 2.7.0, which Trivy flags for CVE-2026-97689 (unbounded chunk-size
-# buffering) and CVE-2026-97687 (HTTPS proxy TLS settings override) -
-# alerts #6173/#6174. Removing pip clears both, and keeps the next vendored
-# CVE out of the image too, rather than waiting on a pip release.
-RUN pip install --no-cache-dir -r explorer-extra-py313.txt -r pep517-build.txt --require-hashes \
-    && pip install --no-cache-dir --no-deps --no-build-isolation . \
-    && rm -f explorer-extra-py313.txt pep517-build.txt \
-    && python -m pip uninstall --yes pip \
+RUN pip install --no-cache-dir --timeout 120 --retries 10 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    ".[explorer,llm-deepseek,graph-neo4j]" \
     && chown -R semantica:semantica /app
 
 USER semantica

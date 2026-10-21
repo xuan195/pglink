@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ontology", tags=["ontology"])
 
 _MAX_FETCH_BYTES = 20 * 1024 * 1024  # 20 MB
-_MAX_ANALYSIS_NODES = 5_000   # cap for health/suggest/shacl node scans to avoid OOM
+_MAX_ANALYSIS_NODES = 20_000   # cap for health/suggest/shacl node scans to avoid OOM
 _MAX_ENTITIES_PER_SIDE = 500  # per-ontology cap for the O(n²) pairwise suggestion loop
 _GRAPH_TOO_LARGE_DETAIL = (
     "Ontology editor graph exceeds the maximum size "
@@ -577,6 +577,25 @@ def _get_versions(request: Request) -> Dict[str, List[VersionEntry]]:
     if not hasattr(request.app.state, "ontology_versions"):
         request.app.state.ontology_versions = {}
     return request.app.state.ontology_versions
+
+
+def _get_neo4j_store(request: Request):
+    """获取 Neo4j store（未配置时返回 None）。"""
+    return getattr(request.app.state, "neo4j_store", None)
+
+
+def _sync_draft_to_neo4j(request: Request, draft: DraftResponse) -> None:
+    store = _get_neo4j_store(request)
+    if store is not None:
+        from ..neo4j_sync import sync_ontology_draft
+        sync_ontology_draft(store, draft.model_dump())
+
+
+def _sync_proposal_to_neo4j(request: Request, proposal: ProposalResponse) -> None:
+    store = _get_neo4j_store(request)
+    if store is not None:
+        from ..neo4j_sync import sync_ontology_proposal
+        sync_ontology_proposal(store, proposal.model_dump())
 
 
 def _alignment_key(source: str, predicate: str, target: str) -> str:
@@ -1696,6 +1715,7 @@ async def create_ontology(
                         "properties": {
                             "rdfs:label": cls.get("name", ""),
                             "rdfs:comment": cls.get("description", ""),
+                            "ontologyUri": onto_uri,
                         },
                     })
                 
@@ -1707,11 +1727,16 @@ async def create_ontology(
                         "id": prop_uri,
                         "type": "owl:ObjectProperty",
                         "content": prop.get("name", ""),
-                        "properties": {"rdfs:label": prop.get("name", "")},
+                        "properties": {
+                            "rdfs:label": prop.get("name", ""),
+                            "ontologyUri": onto_uri,
+                        },
                     })
                     
                     # Only create domain/range edges if domain/range are specified
                     domain = prop.get('domain')
+                    if isinstance(domain, list):
+                        domain = domain[0] if domain and isinstance(domain[0], str) else None
                     if domain and domain.strip():
                         domain_uri = f"{ns}/{domain}"
                         edges.append({
@@ -1722,6 +1747,8 @@ async def create_ontology(
                         })
                     
                     range_val = prop.get('range')
+                    if isinstance(range_val, list):
+                        range_val = range_val[0] if range_val and isinstance(range_val[0], str) else None
                     if range_val and range_val.strip():
                         range_uri = f"{ns}/{range_val}"
                         edges.append({
@@ -1766,6 +1793,7 @@ async def create_ontology(
                         "properties": {
                             "rdfs:label": cls.get("name", ""),
                             "rdfs:comment": cls.get("description", ""),
+                            "ontologyUri": onto_uri,
                         },
                     })
                 
@@ -1777,11 +1805,16 @@ async def create_ontology(
                         "id": prop_uri,
                         "type": "owl:ObjectProperty",
                         "content": prop.get("name", ""),
-                        "properties": {"rdfs:label": prop.get("name", "")},
+                        "properties": {
+                            "rdfs:label": prop.get("name", ""),
+                            "ontologyUri": onto_uri,
+                        },
                     })
                     
                     # Only create domain/range edges if domain/range are specified
                     domain = prop.get('domain')
+                    if isinstance(domain, list):
+                        domain = domain[0] if domain and isinstance(domain[0], str) else None
                     if domain and domain.strip():
                         domain_uri = f"{ns}/{domain}"
                         edges.append({
@@ -1792,6 +1825,8 @@ async def create_ontology(
                         })
                     
                     range_val = prop.get('range')
+                    if isinstance(range_val, list):
+                        range_val = range_val[0] if range_val and isinstance(range_val[0], str) else None
                     if range_val and range_val.strip():
                         range_uri = f"{ns}/{range_val}"
                         edges.append({
@@ -3174,6 +3209,8 @@ async def refresh_ontology(
     return RefreshResponse(uri=ontology_uri, nodes_added=nodes_added, edges_added=edges_added)
 
 
+
+
 # ---------------------------------------------------------------------------
 # Draft endpoints
 # ---------------------------------------------------------------------------
@@ -3209,6 +3246,7 @@ async def save_draft(
         updated_at=now,
     )
     drafts[draft_id] = draft
+    _sync_draft_to_neo4j(request, draft)
     return draft
 
 
@@ -3368,6 +3406,7 @@ async def submit_proposal(
         comments=[],
     )
     proposals[proposal_id] = proposal
+    _sync_proposal_to_neo4j(request, proposal)
     return proposal
 
 
@@ -3413,6 +3452,7 @@ async def approve_proposal(
     proposal = proposals[proposal_id]
     proposal.state = "approved"
     proposal.updated_at = datetime.now(timezone.utc).isoformat()
+    _sync_proposal_to_neo4j(request, proposal)
     return {"status": "approved", "proposal_id": proposal_id}
 
 
@@ -3428,6 +3468,7 @@ async def reject_proposal(
     proposal = proposals[proposal_id]
     proposal.state = "rejected"
     proposal.updated_at = datetime.now(timezone.utc).isoformat()
+    _sync_proposal_to_neo4j(request, proposal)
     return {"status": "rejected", "proposal_id": proposal_id}
 
 
@@ -3508,31 +3549,51 @@ async def publish_proposal(
     edges_added = 0
 
     class_nodes = []
+    modified_classes = draft.diff.modified_classes or {}
     for class_uri in draft.diff.added_classes:
-        label = class_uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+        # Prefer a user-supplied label from modified_classes (Editor custom labels),
+        # falling back to the URI fragment so the Registry/Editor show a real name.
+        label = (modified_classes.get(class_uri, {}) or {}).get("label") \
+            or class_uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
         class_nodes.append({
             "id": class_uri,
             "type": "owl:Class",
             "content": label,
-            "properties": {"rdfs:label": label},
+            "properties": {
+                "rdfs:label": label,
+                "scheme_uri": proposal.ontology_uri,
+                "uri": class_uri,
+            },
         })
     if class_nodes:
         nodes_added += await asyncio.to_thread(session.add_nodes, class_nodes)
 
     property_nodes = []
+    modified_properties = draft.diff.modified_properties or {}
     for prop_uri in draft.diff.added_properties:
-        label = prop_uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+        label = (modified_properties.get(prop_uri, {}) or {}).get("label") \
+            or prop_uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
         property_nodes.append({
             "id": prop_uri,
             "type": "owl:ObjectProperty",
             "content": label,
-            "properties": {"rdfs:label": label},
+            "properties": {
+                "rdfs:label": label,
+                "scheme_uri": proposal.ontology_uri,
+                "uri": prop_uri,
+            },
         })
     if property_nodes:
         nodes_added += await asyncio.to_thread(session.add_nodes, property_nodes)
 
     proposal.state = "published"
     proposal.updated_at = datetime.now(timezone.utc).isoformat()
+
+    store = _get_neo4j_store(request)
+    if store is not None:
+        from ..neo4j_sync import sync_ontology_publish
+        sync_ontology_publish(store, draft.model_dump(), proposal.model_dump(), version_str)
+    _sync_proposal_to_neo4j(request, proposal)
 
     return {
         "status": "published",
@@ -3563,6 +3624,7 @@ async def add_comment(
     }
     proposal.comments.append(comment)
     proposal.updated_at = datetime.now(timezone.utc).isoformat()
+    _sync_proposal_to_neo4j(request, proposal)
     return {"status": "commented", "comment_id": comment["id"]}
 
 

@@ -111,7 +111,13 @@ export function ShaclStudio({ onJumpToNode }: ShaclStudioProps) {
       return first.startsWith(shapeId + " ") || first.startsWith(shapeId + "\n") || first.startsWith(shapeId + "\t");
     });
     if (match) {
-      setShacl(match.trim());
+      // 单 shape 块不含 @prefix 头, 直接提交后端会报 "Prefix sh: not bound"。
+      // 把完整 turtle 的 @prefix/@base 声明一并带进编辑器, 保证局部编辑也能校验。
+      const header = normalised
+        .split("\n")
+        .filter((l) => /^\s*@(prefix|base)\b/i.test(l))
+        .join("\n");
+      setShacl(header ? `${header}\n\n${match.trim()}` : match.trim());
     }
   }, [fullShacl, shacl]);
 

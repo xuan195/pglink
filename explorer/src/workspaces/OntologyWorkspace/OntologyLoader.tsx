@@ -510,6 +510,8 @@ function CreateNewPanel({ onLoaded }: { onLoaded: () => void }) {
   const [tags, setTags] = useState("");
   const [sampleData, setSampleData] = useState("");
   const [schemaText, setSchemaText] = useState("");
+  const [provider, setProvider] = useState("deepseek");
+  const [model, setModel] = useState("deepseek-v4-flash");
   const [createState, setCreateState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -528,6 +530,8 @@ function CreateNewPanel({ onLoaded }: { onLoaded: () => void }) {
           tags: tags ? tags.split(",").map((t) => t.trim()).filter(Boolean) : [],
           sample_data: createMode === "data" ? sampleData : undefined,
           schema_text: createMode === "text" ? schemaText : undefined,
+          provider: createMode !== "scratch" ? provider : undefined,
+          model: createMode !== "scratch" ? model : undefined,
         }),
       });
       if (!res.ok) {
@@ -598,6 +602,17 @@ function CreateNewPanel({ onLoaded }: { onLoaded: () => void }) {
             rows={6}
           />
         </FieldGroup>
+      )}
+
+      {createMode !== "scratch" && (
+        <>
+          <FieldGroup label="LLM Provider">
+            <Input value={provider} onChange={setProvider} placeholder="deepseek" />
+          </FieldGroup>
+          <FieldGroup label="Model">
+            <Input value={model} onChange={setModel} placeholder="deepseek-v4-flash" />
+          </FieldGroup>
+        </>
       )}
 
       {createState === "success" && (

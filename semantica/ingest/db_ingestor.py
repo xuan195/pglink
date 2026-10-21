@@ -252,9 +252,16 @@ class DatabaseConnector:
             # Create SQLAlchemy engine
             self.engine = create_engine(connection_string, echo=False)
 
-            # Test connection with a simple query
+            # Test connection with a simple query.
+            # Oracle 不支持无 FROM 子句的 SELECT, 需要 SELECT 1 FROM DUAL;
+            # 其他数据库 (PG/MySQL/SQLite/MSSQL) 直接 SELECT 1 即可。
+            _test_sql = (
+                "SELECT 1 FROM DUAL"
+                if self.engine.dialect.name == "oracle"
+                else "SELECT 1"
+            )
             with self.engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
+                conn.execute(text(_test_sql))
 
             self.logger.info(f"Connected to {self.db_type or 'database'}")
             return self.engine
@@ -291,8 +298,14 @@ class DatabaseConnector:
         try:
             from sqlalchemy import create_engine, text
             engine = create_engine(connection_string)
+            # Oracle 需要 SELECT 1 FROM DUAL, 其他数据库 SELECT 1 即可。
+            _test_sql = (
+                "SELECT 1 FROM DUAL"
+                if engine.dialect.name == "oracle"
+                else "SELECT 1"
+            )
             with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
+                conn.execute(text(_test_sql))
             engine.dispose()
             return True
         except Exception as e:
@@ -401,7 +414,18 @@ class DataExporter:
             )
 
             # Build SQL query with optional clauses
-            table_ref = f'{f"{schema}." if schema else ""}"{table_name}"'
+            _dialect = connection.dialect.name
+            # Oracle 默认大写存储标识符; 双引号会强制区分大小写导致 ORA-00942。
+            # 仅对标准标识符 (纯字母/数字/下划线) 不加引号, 让 Oracle 默认大写匹配;
+            # 含特殊字符的表名仍用双引号保护 (前面 _validate_sql_identifier 已拦截非法名)。
+            if _dialect == "oracle" and _IDENTIFIER_RE.match(table_name):
+                _name_part = table_name
+                if schema and _IDENTIFIER_RE.match(schema):
+                    table_ref = f"{schema}.{_name_part}"
+                else:
+                    table_ref = _name_part
+            else:
+                table_ref = f'{f"{schema}." if schema else ""}"{table_name}"'
             query = f"SELECT * FROM {table_ref}"
 
             if where:
@@ -410,11 +434,19 @@ class DataExporter:
             if order_by:
                 query += f" ORDER BY {order_by}"
 
-            if limit:
-                query += f" LIMIT {limit}"
+            # Oracle 不支持 LIMIT/OFFSET, 用 SQL:2008 标准 FETCH 语法 (Oracle 12c+)
+            # 其他数据库 (PG/MySQL/SQLite/MSSQL) 保持 LIMIT/OFFSET
+            if limit and _dialect == "oracle":
+                if offset:
+                    query += f" OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
+                else:
+                    query += f" FETCH FIRST {int(limit)} ROWS ONLY"
+            else:
+                if limit:
+                    query += f" LIMIT {limit}"
 
-            if offset:
-                query += f" OFFSET {offset}"
+                if offset:
+                    query += f" OFFSET {offset}"
 
             # Execute query and process results
             with connection.connect() as conn:
@@ -586,6 +618,8 @@ class DataExporter:
             for table_name in tables:
                 try:
                     foreign_keys = inspector.get_foreign_keys(table_name, schema=schema)
+                    for fk in foreign_keys:
+                        fk.setdefault("constrained_table", table_name)
                     schema_info["foreign_keys"].extend(foreign_keys)
                 except Exception:
                     pass

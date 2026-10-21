@@ -242,12 +242,14 @@ class OntologyEngine:
             message="Generating SHACL shapes",
         )
         try:
-            ns = ontology.get("namespace", {}) if isinstance(ontology, dict) else {}
-            resolved_base = (
-                base_uri
-                or (ns.get("base_uri") if isinstance(ns, dict) else None)
-                or "https://semantica.dev/shapes/"
-            )
+            ns = ontology.get("namespace") if isinstance(ontology, dict) else None
+            if isinstance(ns, dict):
+                ns_base = ns.get("base_uri")
+            elif isinstance(ns, str) and ns:
+                ns_base = ns
+            else:
+                ns_base = None
+            resolved_base = base_uri or ns_base or "https://semantica.dev/shapes/"
             # These two are constructor-only on SHACLGenerator, so forwarding
             # them through generate(**options) silently dropped them.
             generator = SHACLGenerator(

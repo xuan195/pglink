@@ -1,35 +1,60 @@
 services:
   explorer:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # 直接用本地已构建/已 tag 的镜像，不重建（避免重新下载几十 GB 依赖）。
     image: semantica-knowledge-explorer:latest
+    # 覆盖镜像默认 CMD，开启 uvicorn 热重载。
+    # 改本地 .py 文件 → uvicorn 自动检测变更并重启 → 新代码即时生效。
+    command: ["python", "-m", "uvicorn", "semantica.explorer.app:app", "--reload", "--reload-dir", "/app/semantica", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      # 挂载本地 Python 源码到容器 /app/semantica，覆盖镜像内的包副本。
+      # 这样本地改 .py 文件 → 容器内同步可见 → 配合 --reload 自动生效。
+      - ./semantica:/app/semantica
+      # 挂载学习目录，让本地 learn/ 脚本可在容器内执行（复用容器已装的 semantica）。
+      - ./learn:/app/learn
     environment:
-      FALKORDB_HOST: falkordb
-      FALKORDB_PORT: "6379"
+      # ---- Neo4j 图数据库基座（穿山甲项目统一图存储）----
+      GRAPH_STORE_DEFAULT_BACKEND: neo4j
+      GRAPH_STORE_NEO4J_URI: bolt://neo4j:7687
+      GRAPH_STORE_NEO4J_USER: ${NEO4J_USER:-neo4j}
+      GRAPH_STORE_NEO4J_PASSWORD: ${NEO4J_PASSWORD:-pangolin123}
+      GRAPH_STORE_NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      # ---- Explorer 自身 ----
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
       # Required for API access - the Explorer refuses all protected routes
       # (503) until this is set. Generate one with `openssl rand -hex 32`.
       SEMANTICA_API_KEY: ${SEMANTICA_API_KEY:-}
       # Trusted local-only setups only: bypasses the API key entirely.
       SEMANTICA_ALLOW_ANONYMOUS: ${SEMANTICA_ALLOW_ANONYMOUS:-false}
+      # ---- LLM 提供商（本体自动生成 / POST /api/ontology/create）----
+      # DeepSeek 原生支持：provider="deepseek" 时用 DEEPSEEK_API_KEY。
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     depends_on:
-      falkordb:
-        condition: service_started
+      neo4j:
+        condition: service_healthy
     ports:
       - "8000:8000"
     networks:
       - semantica
     restart: unless-stopped
 
-  falkordb:
-    image: falkordb/falkordb:latest
+  neo4j:
+    image: neo4j:5.26.0-community
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-pangolin123}
+      # 允许任意来源 Bolt 连接（本地开发）；生产请收紧。
+      NEO4J_dbms_security_auth__enabled: "true"
     ports:
-      - "6379:6379"
+      - "7474:7474"   # Neo4j Browser (HTTP)
+      - "7687:7687"   # Bolt
     volumes:
-      - falkordb_data:/data
+      - neo4j_data:/data
     networks:
       - semantica
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
 
 networks:
@@ -37,4 +62,4 @@ networks:
     driver: bridge
 
 volumes:
-  falkordb_data:
+  neo4j_data:
