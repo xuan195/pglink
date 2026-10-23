@@ -19,6 +19,11 @@ permissions:
 
 jobs:
   verify:
+    # Fork guard (local-only, do not sync upstream): this mirror fork skips
+    # the pin-drift check. Action tag movement is upstream's supply-chain
+    # housekeeping (their dependabot bumps the pins); on the fork it only
+    # produces red runs between upstream updates.
+    if: github.repository == 'semantica-agi/semantica'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
