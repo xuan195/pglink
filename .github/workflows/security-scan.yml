@@ -60,6 +60,11 @@ jobs:
           fi
 
   security-scan:
+    # Fork guard (local-only, do not sync upstream): this mirror fork skips
+    # the upstream security scan entirely. CVE tracking against the
+    # hash-pinned lockfiles is upstream's job, and the fork's "Report
+    # Scheduled Failure" step cannot open issues (Issues disabled on the
+    # fork), which turned every scheduled/push run red.
     # For pull_request events:
     #   - skip only when changes ran successfully and explicitly set src=false
     #     (i.e. a confirmed docs-only PR).
@@ -70,7 +75,8 @@ jobs:
     # the scan still runs unconditionally for those triggers.
     needs: [changes]
     if: >-
-      always() && (
+      always() &&
+      github.repository == 'semantica-agi/semantica' && (
         github.event_name != 'pull_request' ||
         needs.changes.result != 'success' ||
         needs.changes.outputs.src == 'true'
