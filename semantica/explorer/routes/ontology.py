@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ontology", tags=["ontology"])
 
 _MAX_FETCH_BYTES = 20 * 1024 * 1024  # 20 MB
+# local-only: raised from upstream's 5_000 for our larger ontologies; keep on sync.
 _MAX_ANALYSIS_NODES = 20_000   # cap for health/suggest/shacl node scans to avoid OOM
 _MAX_ENTITIES_PER_SIDE = 500  # per-ontology cap for the O(n²) pairwise suggestion loop
 _GRAPH_TOO_LARGE_DETAIL = (
@@ -579,6 +580,9 @@ def _get_versions(request: Request) -> Dict[str, List[VersionEntry]]:
     return request.app.state.ontology_versions
 
 
+# local-only: Neo4j persistence hooks. The sync implementations live in
+# semantica/explorer/local_neo4j_hooks.py + neo4j_sync.py; these thin wrappers
+# stay here because the write paths are inside the route handlers.
 def _get_neo4j_store(request: Request):
     """获取 Neo4j store（未配置时返回 None）。"""
     return getattr(request.app.state, "neo4j_store", None)
